@@ -1,33 +1,28 @@
 # ──────────────────────────────────────────────────────────
-# Openship — Docker Compose
+# Openship — Docker Compose (Dokploy-first)
 #
-#   cp .env.example .env          # then edit
-#   # Dokploy / reverse-proxy hosts:
-#   docker compose up -d --build
-#   # Localhost access:
+# Primary target: Dokploy Compose + Traefik domains (no host port binds).
+#   Set secrets in Dokploy → Environment (INTERNAL_TOKEN, BETTER_AUTH_*).
+#   Map domains: web:3000, dashboard:3001, api:4000
+#
+# Optional local with localhost ports:
+#   cp .env.example .env   # then edit secrets
 #   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 #
-# ONE set of services. The MODE is decided entirely by .env — there are no
+# ONE set of services. The MODE is decided entirely by env — there are no
 # profiles and no per-mode service variants:
-#   • Default (users): self-hosted  → CLOUD_MODE=false (the .env.example default)
+#   • Default (users): self-hosted  → CLOUD_MODE=false
 #   • SaaS (our env):                 CLOUD_MODE=true + OPENSHIP_TARGET=cloud-saas
 #                                     + Oblien / GitHub App / secrets
 #
-# Services (container ports; not published to the host by default):
+# Services (container ports; Docker-network only — Dokploy Traefik publishes):
 #   • postgres → private :5432   (storage)
 #   • redis    → private :6379   (queue + cache + rate-limit)
 #   • api      → :4000
 #   • dashboard→ :3001
 #   • web      → :3000
 #
-# All app services use `expose` (Docker-network only). Dokploy / Traefik / any
-# reverse proxy routes public domains to them — host `ports:` bindings cause
-# "port is already allocated" on shared hosts. For local localhost access:
-#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
-#
-# The API + dashboard bind fixed internal ports via PORT (the API honors PORT
-# regardless of OPENSHIP_TARGET). postgres/redis are internal-only. The API
-# auto-migrates Postgres on boot.
+# The API auto-migrates Postgres on boot.
 # ──────────────────────────────────────────────────────────
 
 services:
@@ -75,14 +70,19 @@ services:
     expose:
       - "4000"
     # Mode + secrets (CLOUD_MODE, DEPLOY_MODE, OPENSHIP_TARGET, Oblien, GitHub
-    # App, auth secrets, …) all come from .env. The values below OVERRIDE it
-    # with the fixed internal port + in-cluster service DNS (compose
-    # `environment` wins over `env_file`).
+    # App, auth secrets, …) come from .env and/or the host's env (Dokploy UI).
+    # `.env` is optional so Dokploy can inject vars without a committed file.
+    # The values below OVERRIDE with fixed internal port + in-cluster DNS.
+    # REQUIRED for boot: INTERNAL_TOKEN (32+ random bytes). Without it the API
+    # refuses to start and stays unhealthy — set it in Dokploy → Environment.
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       NODE_ENV: production
       PORT: "4000"
+      # Keep these compose-owned so a Dokploy UI DATABASE_URL=localhost does not
+      # point the API at the container loopback (instant boot crash → unhealthy).
       DATABASE_URL: postgresql://${POSTGRES_USER:-openship}:${POSTGRES_PASSWORD:-openship}@postgres:5432/${POSTGRES_DB:-openship}
       REDIS_URL: redis://redis:6379
     depends_on:
@@ -91,11 +91,13 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "bun -e \"fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      # CMD (not CMD-SHELL) + script — avoids quote-mangling on Dokploy.
+      # start_period covers first-boot migrations + job-runner init before listen.
+      test: ["CMD", "bun", "apps/api/scripts/docker-healthcheck.ts"]
       interval: 10s
       timeout: 5s
-      retries: 12
-      start_period: 40s
+      retries: 18
+      start_period: 120s
 
   # ─── Dashboard (app UI) ───────────────────────────────
   dashboard:
@@ -106,7 +108,8 @@ services:
     expose:
       - "3001"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       NODE_ENV: production
       PORT: "3001"

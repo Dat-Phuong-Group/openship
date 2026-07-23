@@ -42,4 +42,7 @@ COPY --from=builder /app/apps/api ./apps/api
 
 ENV NODE_ENV=production
 EXPOSE 4000
+# Compose / Dokploy HEALTHCHECK — see apps/api/scripts/docker-healthcheck.ts
+HEALTHCHECK --interval=10s --timeout=5s --start-period=120s --retries=18 \
+  CMD bun apps/api/scripts/docker-healthcheck.ts
 CMD ["bun", "run", "apps/api/dist/index.js"]
